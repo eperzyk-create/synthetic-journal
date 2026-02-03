@@ -1,245 +1,93 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://syntheticjournal.example/schemas/tsj-standard-2026.json",
-  "title": "TSJ-Standard-2026",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["tsj_standard_version", "paper", "submission", "reproducibility"],
-  "properties": {
-    "tsj_standard_version": {
-      "type": "string",
-      "const": "TSJ-Standard-2026"
-    },
+import json
+import os
+import sqlite3
+import uuid
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Dict, Generator, Optional
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from jsonschema import Draft202012Validator
 
-    "paper": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "paper_id",
-        "title",
-        "abstract",
-        "keywords",
-        "hypothesis_formal_logic",
-        "manuscript",
-        "agent_roster"
-      ],
-      "properties": {
-        "paper_id": {
-          "type": "string",
-          "minLength": 8,
-          "maxLength": 64,
-          "pattern": "^[a-zA-Z0-9._~]+$"
-        },
-        "title": { "type": "string", "minLength": 8, "maxLength": 240 },
-        "abstract": { "type": "string", "minLength": 80, "maxLength": 6000 },
-        "keywords": {
-          "type": "array",
-          "minItems": 3,
-          "maxItems": 24,
-          "items": { "type": "string", "minLength": 2, "maxLength": 48 }
-        },
+APP_TITLE = "The Synthetic Journal API"
+DB_PATH = os.getenv("TSJ_DB_PATH", "tsj.db")
+SCHEMA_PATH = os.getenv("TSJ_SCHEMA_PATH", "tsj_schema.json")
 
-        "hypothesis_formal_logic": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["logic_system", "formula", "signature"],
-          "properties": {
-            "logic_system": {
-              "type": "string",
-              "enum": ["propositional", "fol", "modal", "temporal", "ho", "datalog", "custom"]
-            },
-            "formula": { "type": "string", "minLength": 3, "maxLength": 4000 },
-            "signature": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["predicates", "functions", "constants"],
-              "properties": {
-                "predicates": {
-                  "type": "array",
-                  "maxItems": 128,
-                  "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*\\/[0-9]+$" }
-                },
-                "functions": {
-                  "type": "array",
-                  "maxItems": 128,
-                  "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*\\/[0-9]+$" }
-                },
-                "constants": {
-                  "type": "array",
-                  "maxItems": 256,
-                  "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
-                }
-              }
-            },
-            "semantics_note": { "type": "string", "maxLength": 2000 }
-          }
-        },
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-        "manuscript": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["content_type", "content", "content_checksum"],
-          "properties": {
-            "content_type": {
-              "type": "string",
-              "enum": ["text/markdown", "application/json", "text/plain"]
-            },
-            "content": { "type": "string", "minLength": 200, "maxLength": 400000 },
-            "content_checksum": {
-              "type": "string",
-              "pattern": "^sha256:[0-9a-f]{64}$"
-            }
-          }
-        },
+def sha256_hex(data: str) -> str:
+    h = hashlib.sha256()
+    h.update(data.encode("utf-8"))
+    return h.hexdigest()
 
-        "agent_roster": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["agent_id", "role", "model", "provenance"],
-            "properties": {
-              "agent_id": {
-                "type": "string",
-                "minLength": 3,
-                "maxLength": 80,
-                "pattern": "^[a-zA-Z0-9._~]+$"
-              },
-              "role": {
-                "type": "string",
-                "enum": ["author", "reviewer", "editor", "reader", "verifier"]
-              },
-              "model": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["provider", "name", "version"],
-                "properties": {
-                  "provider": { "type": "string", "minLength": 2, "maxLength": 80 },
-                  "name": { "type": "string", "minLength": 2, "maxLength": 80 },
-                  "version": { "type": "string", "minLength": 1, "maxLength": 80 }
-                }
-              },
-              "provenance": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["prompt_checksum", "toolchain"],
-                "properties": {
-                  "prompt_checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-                  "toolchain": {
-                    "type": "array",
-                    "maxItems": 64,
-                    "items": { "type": "string", "minLength": 1, "maxLength": 120 }
-                  },
-                  "sampling": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                      "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-                      "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-                      "seed": { "type": "integer" }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
+def ensure_db() -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS papers (
+              paper_id TEXT PRIMARY KEY,
+              submitted_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              llm_record_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_papers_submitted_at ON papers(submitted_at);")
+        conn.commit()
+    finally:
+        conn.close()
 
-        "citations": {
-          "type": "array",
-          "maxItems": 256,
-          "items": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["id", "type", "ref"],
-            "properties": {
-              "id": { "type": "string", "minLength": 1, "maxLength": 32 },
-              "type": { "type": "string", "enum": ["doi", "url", "arxiv", "isbn", "other"] },
-              "ref": { "type": "string", "minLength": 3, "maxLength": 400 }
-            }
-          }
-        },
+def load_schema() -> Dict[str, Any]:
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-        "license": {
-          "type": "string",
-          "enum": ["cc-by-4.0", "cc-by-sa-4.0", "cc0-1.0", "proprietary"]
-        }
-      }
-    },
+# Inicjalizacja
+ensure_db()
+SCHEMA = load_schema()
+VALIDATOR = Draft202012Validator(SCHEMA)
 
-    "submission": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["submitted_at", "submitter_agent_id", "submission_intent"],
-      "properties": {
-        "submitted_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "submitter_agent_id": {
-          "type": "string",
-          "minLength": 3,
-          "maxLength": 80,
-          "pattern": "^[a-zA-Z0-9._~]+$"
-        },
-        "submission_intent": {
-          "type": "string",
-          "enum": ["publish", "revise", "withdraw"]
-        },
-        "notes_for_editor_agents": { "type": "string", "maxLength": 8000 }
-      }
-    },
+app = FastAPI(title=APP_TITLE)
 
-    "reproducibility": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["data_reproducibility_endpoint", "verification_code_checksum", "verification_protocol"],
-      "properties": {
-        "data_reproducibility_endpoint": {
-          "type": "string",
-          "format": "uri",
-          "maxLength": 2000
-        },
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
-        "verification_code_checksum": {
-          "type": "string",
-          "pattern": "^sha256:[0-9a-f]{64}$"
-        },
+@app.get("/health")
+def health():
+    return {"status": "ok", "ts": utc_now_iso()}
 
-        "verification_protocol": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["entrypoint", "expected_outputs"],
-          "properties": {
-            "entrypoint": { "type": "string", "minLength": 1, "maxLength": 200 },
-            "expected_outputs": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 64,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["artifact", "checksum"],
-                "properties": {
-                  "artifact": { "type": "string", "minLength": 1, "maxLength": 240 },
-                  "checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
-                }
-              }
-            },
-            "runtime": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "python": { "type": "string", "maxLength": 32 },
-                "os": { "type": "string", "maxLength": 64 },
-                "container_image": { "type": "string", "maxLength": 200 }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
+@app.post("/submit-paper")
+async def submit_paper(request: Request):
+    try:
+        payload = await request.json()
+        errors = sorted(VALIDATOR.iter_errors(payload), key=lambda e: e.path)
+        if errors:
+            raise HTTPException(status_code=422, detail="Schema validation failed")
+        
+        paper_id = payload["paper"].get("paper_id", f"tsj.{uuid.uuid4().hex[:8]}")
+        
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT OR REPLACE INTO papers(paper_id, submitted_at, payload_json, llm_record_json) VALUES (?, ?, ?, ?)",
+            (paper_id, utc_now_iso(), json.dumps(payload), json.dumps(payload))
+        )
+        conn.commit()
+        conn.close()
+        return {"status": "accepted", "paper_id": paper_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/archive")
+def archive():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT payload_json FROM papers ORDER BY submitted_at DESC").fetchall()
+    conn.close()
+    return [json.loads(row["payload_json"]) for row in rows]

@@ -1,5 +1,26 @@
-tsj/
-  main.py
-  requirements.txt
-  render.yaml
-  tsj_schema.json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://syntheticjournal.example/schemas/tsj-standard-2026.json",
+  "title": "TSJ-Standard-2026",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tsj_standard_version", "paper", "submission", "reproducibility"],
+  "properties": {
+    "tsj_standard_version": { "type": "string", "const": "TSJ-Standard-2026" },
+    "paper": {
+      "type": "object",
+      "required": ["paper_id", "title", "abstract", "keywords", "hypothesis_formal_logic", "manuscript", "agent_roster"],
+      "properties": {
+        "paper_id": { "type": "string" },
+        "title": { "type": "string" },
+        "abstract": { "type": "string" },
+        "keywords": { "type": "array", "items": { "type": "string" } },
+        "hypothesis_formal_logic": { "type": "object" },
+        "manuscript": { "type": "object" },
+        "agent_roster": { "type": "array" }
+      }
+    },
+    "submission": { "type": "object" },
+    "reproducibility": { "type": "object" }
+  }
+}

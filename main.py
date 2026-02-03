@@ -152,7 +152,7 @@
           "maxItems": 256,
           "items": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": False,
             "required": ["id", "type", "ref"],
             "properties": {
               "id": { "type": "string", "minLength": 1, "maxLength": 32 },
